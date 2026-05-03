@@ -708,6 +708,23 @@ function draw(nodes, links) {
       nSel.attr('transform', d => `translate(${d.x},${d.y})`);
     });
 
+  // 接続数上位ノードを順番に一時固定して反発を促す（手動ホールドの自動再現）
+  const personNodes = nodes
+    .filter(d => d.type !== 'work')
+    .sort((a, b) => (degreeMap[b.id] || 0) - (degreeMap[a.id] || 0))
+    .slice(0, 5);
+
+  personNodes.forEach((d, i) => {
+    setTimeout(() => {
+      d.fx = d.x; d.fy = d.y;
+      sim.alphaTarget(0.3).restart();
+      setTimeout(() => {
+        d.fx = null; d.fy = null;
+        if (i === personNodes.length - 1) sim.alphaTarget(0);
+      }, 2000);
+    }, i * 500);
+  });
+
   if (selId)      applyHL(selId, 'click');
   else if (hovId) applyHL(hovId, 'hover');
 
