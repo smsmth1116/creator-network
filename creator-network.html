@@ -675,7 +675,8 @@ function draw(nodes, links) {
   });
 
   if (sim) sim.stop();
-  // ノードごとの接続数（次数）を計算
+
+  /* ── 1. 次数マップ ── */
   const degreeMap = {};
   links.forEach(l => {
     const sid = typeof l.source === 'object' ? l.source.id : l.source;
@@ -684,73 +685,90 @@ function draw(nodes, links) {
     degreeMap[tid] = (degreeMap[tid] || 0) + 1;
   });
 
-  // 人物ノードのカテゴリ重心を計算してクラスタリング配置
-  // 各人物が関わる作品のcatsを集計し、カテゴリの出現ベクトルを作る
-  const allCats = [...new Set(nodes.filter(n => n.type === 'work').flatMap(n => n.cats || []))];
-  const workById = Object.fromEntries(nodes.filter(n => n.type === 'work').map(n => [n.id, n]));
+  /* ── 2. カテゴリクラスタ中心を円形に配置 ── */
+  const allCats = [...new Set(nodes.filter(n => n.type === 'work').flatMap(n => n.cats || []))].sort();
+  const nCats = allCats.length || 1;
+  const clusterR = Math.min(W, H) * 0.36; // 画面の36%半径で円形配置
+  const catCenter = {};
+  allCats.forEach((c, i) => {
+    const angle = (i / nCats) * 2 * Math.PI - Math.PI / 2;
+    catCenter[c] = { x: W / 2 + clusterR * Math.cos(angle), y: H / 2 + clusterR * Math.sin(angle) };
+  });
 
-  // 人物ノードごとにカテゴリベクトルを作成
-  const catVec = {};
-  nodes.filter(d => d.type !== 'work').forEach(d => {
+  /* ── 3. 作品ノードの初期位置 = 主カテゴリの中心付近にジッター配置 ── */
+  const workById = Object.fromEntries(nodes.filter(n => n.type === 'work').map(n => [n.id, n]));
+  nodes.filter(n => n.type === 'work').forEach((d, i) => {
+    const primaryCat = (d.cats || [])[0];
+    const center = primaryCat ? catCenter[primaryCat] : { x: W / 2, y: H / 2 };
+    const spread = 90;
+    const a = Math.random() * 2 * Math.PI, r = Math.random() * spread;
+    d.x = center.x + r * Math.cos(a);
+    d.y = center.y + r * Math.sin(a);
+  });
+
+  /* ── 4. 人物ノードの初期位置 = 自分の作品群のカテゴリ重心 ── */
+  nodes.filter(d => d.type !== 'work').forEach((d, i) => {
     const vec = {};
     (d.works || []).forEach(wid => {
       const w = workById[wid];
       (w?.cats || []).forEach(c => { vec[c] = (vec[c] || 0) + 1; });
     });
-    catVec[d.id] = vec;
+    const total = Object.values(vec).reduce((s, v) => s + v, 0) || 0;
+    if (total === 0) {
+      // 作品なし → 円周上に均等配置
+      const angle = (i / nodes.filter(n => n.type !== 'work').length) * 2 * Math.PI;
+      d.x = W / 2 + clusterR * 0.6 * Math.cos(angle);
+      d.y = H / 2 + clusterR * 0.6 * Math.sin(angle);
+    } else {
+      // カテゴリ加重重心
+      let cx = 0, cy = 0;
+      Object.entries(vec).forEach(([c, cnt]) => {
+        const cc = catCenter[c] || { x: W / 2, y: H / 2 };
+        cx += cc.x * (cnt / total);
+        cy += cc.y * (cnt / total);
+      });
+      // 中心から少し外にオフセット（作品群の中心に被らないように）
+      const dx = cx - W / 2, dy = cy - H / 2;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const personOffset = 60;
+      d.x = cx + (dx / dist) * personOffset + (Math.random() - 0.5) * 40;
+      d.y = cy + (dy / dist) * personOffset + (Math.random() - 0.5) * 40;
+    }
   });
 
-  // カテゴリ同士のコサイン類似度で人物ノードを2次元にマッピング
-  // 全カテゴリのTF-IDF的な重心座標を求めてangleに反映
-  // カテゴリをアルファベット順でインデックス化し角度を割り当て
-  const catAngle = {};
-  allCats.forEach((c, i) => { catAngle[c] = (i / allCats.length) * 2 * Math.PI; });
-
-  const personNodes = nodes.filter(d => d.type !== 'work');
-  personNodes.forEach((d, i) => {
-    const vec = catVec[d.id] || {};
-    const total = Object.values(vec).reduce((s, v) => s + v, 0) || 1;
-    // カテゴリの重みで角度を加重平均（円周上の重心）
-    let sx = 0, sy = 0;
-    Object.entries(vec).forEach(([c, cnt]) => {
-      sx += Math.cos(catAngle[c]) * (cnt / total);
-      sy += Math.sin(catAngle[c]) * (cnt / total);
+  /* ── 5. カテゴリクラスタ引力（カスタムforce） ── */
+  // 作品ノードを主カテゴリ中心に引き寄せる
+  const clusterStrength = 0.12;
+  function forceCluster(alpha) {
+    nodes.forEach(d => {
+      if (d.type !== 'work') return;
+      const primaryCat = (d.cats || [])[0];
+      if (!primaryCat || !catCenter[primaryCat]) return;
+      const cc = catCenter[primaryCat];
+      d.vx += (cc.x - d.x) * clusterStrength * alpha;
+      d.vy += (cc.y - d.y) * clusterStrength * alpha;
     });
-    // カテゴリがない場合はランダム角
-    const angle = (sx === 0 && sy === 0)
-      ? (i / personNodes.length) * 2 * Math.PI
-      : Math.atan2(sy, sx);
-    const deg = degreeMap[d.id] || 1;
-    const r = Math.min(W, H) * 5;
-    d.x = W / 2 + r * Math.cos(angle);
-    d.y = H / 2 + r * Math.sin(angle);
-  });
-
-  // 接続数上位（人物ノード数の1/10）を現在位置で固定してシミュレーションに渡す
-  const pinCount = Math.max(1, Math.round(personNodes.length / 10));
-  const pinNodes = [...personNodes]
-    .sort((a, b) => (degreeMap[b.id] || 0) - (degreeMap[a.id] || 0))
-    .slice(0, pinCount);
-  pinNodes.forEach(d => { d.fx = d.x; d.fy = d.y; });
+  }
 
   sim = d3.forceSimulation(nodes)
-    .force('link',    d3.forceLink(links).id(d => d.id).distance(d => d.ltype === 'dir' ? 220 : 260).strength(.5))
-    .force('charge',  d3.forceManyBody().strength(-700))
-    .force('center',  d3.forceCenter(W/2, H/2))
-    .force('collide', d3.forceCollide(d => d.type === 'work' ? Math.sqrt((CW/2)**2 + (CH/2)**2) + 18 : (d.type === 'director' ? DR : AR) + 14))
-    .alphaDecay(.015)
+    .force('link',    d3.forceLink(links).id(d => d.id)
+      .distance(d => d.ltype === 'dir' ? 160 : 190)
+      .strength(d => d.ltype === 'dir' ? 0.7 : 0.5))
+    .force('charge',  d3.forceManyBody().strength(d => d.type === 'work' ? -300 : -500))
+    .force('center',  d3.forceCenter(W/2, H/2).strength(0.04))
+    .force('collide', d3.forceCollide(d => d.type === 'work'
+      ? Math.sqrt((CW/2)**2 + (CH/2)**2) + 12
+      : (d.type === 'director' ? DR : AR) + 10))
+    .force('cluster', forceCluster)
+    .alphaDecay(.012)
     .on('tick', () => {
       lpSel.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
            .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
       nSel.attr('transform', d => `translate(${d.x},${d.y})`);
     });
 
-  // 1秒後に一斉解放
-  sim.alphaTarget(0.5).restart();
-  setTimeout(() => {
-    pinNodes.forEach(d => { d.fx = null; d.fy = null; });
-    sim.alphaTarget(0);
-  }, 1000);
+  sim.alphaTarget(0.3).restart();
+  setTimeout(() => { sim.alphaTarget(0); }, 800);
 
   if (selId)      applyHL(selId, 'click');
   else if (hovId) applyHL(hovId, 'hover');
