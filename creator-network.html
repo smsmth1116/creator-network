@@ -688,7 +688,7 @@ function draw(nodes, links) {
   /* ── 2. カテゴリクラスタ中心を円形に配置 ── */
   const allCats = [...new Set(nodes.filter(n => n.type === 'work').flatMap(n => n.cats || []))].sort();
   const nCats = allCats.length || 1;
-  const clusterR = Math.min(W, H) * 0.36; // 画面の36%半径で円形配置
+  const clusterR = Math.min(W, H) * 3.6; // 画面の360%半径で円形配置
   const catCenter = {};
   allCats.forEach((c, i) => {
     const angle = (i / nCats) * 2 * Math.PI - Math.PI / 2;
@@ -700,7 +700,7 @@ function draw(nodes, links) {
   nodes.filter(n => n.type === 'work').forEach((d, i) => {
     const primaryCat = (d.cats || [])[0];
     const center = primaryCat ? catCenter[primaryCat] : { x: W / 2, y: H / 2 };
-    const spread = 90;
+    const spread = 900;
     const a = Math.random() * 2 * Math.PI, r = Math.random() * spread;
     d.x = center.x + r * Math.cos(a);
     d.y = center.y + r * Math.sin(a);
