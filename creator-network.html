@@ -684,14 +684,44 @@ function draw(nodes, links) {
     degreeMap[tid] = (degreeMap[tid] || 0) + 1;
   });
 
-  // 人物ノードの初期座標を接続数に応じて中心から放射状に配置
-  // 接続数が多いほど外側に置くことで初期の重なりを防ぐ
-  const maxDeg = Math.max(1, ...Object.values(degreeMap));
-  nodes.forEach((d, i) => {
-    if (d.type === 'work') return; // 作品はD3のデフォルトに任せる
+  // 人物ノードのカテゴリ重心を計算してクラスタリング配置
+  // 各人物が関わる作品のcatsを集計し、カテゴリの出現ベクトルを作る
+  const allCats = [...new Set(nodes.filter(n => n.type === 'work').flatMap(n => n.cats || []))];
+  const workById = Object.fromEntries(nodes.filter(n => n.type === 'work').map(n => [n.id, n]));
+
+  // 人物ノードごとにカテゴリベクトルを作成
+  const catVec = {};
+  nodes.filter(d => d.type !== 'work').forEach(d => {
+    const vec = {};
+    (d.works || []).forEach(wid => {
+      const w = workById[wid];
+      (w?.cats || []).forEach(c => { vec[c] = (vec[c] || 0) + 1; });
+    });
+    catVec[d.id] = vec;
+  });
+
+  // カテゴリ同士のコサイン類似度で人物ノードを2次元にマッピング
+  // 全カテゴリのTF-IDF的な重心座標を求めてangleに反映
+  // カテゴリをアルファベット順でインデックス化し角度を割り当て
+  const catAngle = {};
+  allCats.forEach((c, i) => { catAngle[c] = (i / allCats.length) * 2 * Math.PI; });
+
+  const personNodes = nodes.filter(d => d.type !== 'work');
+  personNodes.forEach((d, i) => {
+    const vec = catVec[d.id] || {};
+    const total = Object.values(vec).reduce((s, v) => s + v, 0) || 1;
+    // カテゴリの重みで角度を加重平均（円周上の重心）
+    let sx = 0, sy = 0;
+    Object.entries(vec).forEach(([c, cnt]) => {
+      sx += Math.cos(catAngle[c]) * (cnt / total);
+      sy += Math.sin(catAngle[c]) * (cnt / total);
+    });
+    // カテゴリがない場合はランダム角
+    const angle = (sx === 0 && sy === 0)
+      ? (i / personNodes.length) * 2 * Math.PI
+      : Math.atan2(sy, sx);
     const deg = degreeMap[d.id] || 1;
-    const r = 200 + (deg / maxDeg) * Math.min(W, H) * 0.38;
-    const angle = (i / nodes.filter(n => n.type !== 'work').length) * 2 * Math.PI;
+    const r = Math.min(W, H) * 1.5;
     d.x = W / 2 + r * Math.cos(angle);
     d.y = H / 2 + r * Math.sin(angle);
   });
@@ -708,30 +738,7 @@ function draw(nodes, links) {
       nSel.attr('transform', d => `translate(${d.x},${d.y})`);
     });
 
-  // 接続数上位（人物ノード数の1/10）を外周に配置して固定→一斉解放（手動ホールドの自動再現）
-  const personNodes = nodes
-    .filter(d => d.type !== 'work')
-    .sort((a, b) => (degreeMap[b.id] || 0) - (degreeMap[a.id] || 0));
-  const pinCount = Math.max(1, Math.round(personNodes.length / 10));
-  const pinNodes = personNodes.slice(0, pinCount);
 
-  // 対象ノードを画面外周に均等配置して固定
-  const pinR = Math.max(W, H) * 5;
-  pinNodes.forEach((d, i) => {
-    const angle = (i / pinCount) * 2 * Math.PI;
-    d.x = W / 2 + pinR * Math.cos(angle);
-    d.y = H / 2 + pinR * Math.sin(angle);
-    d.fx = d.x; d.fy = d.y;
-  });
-
-  // シミュレーションを加熱して他のノードを反発させる
-  sim.alphaTarget(0.5).restart();
-
-  // 1秒後に一斉解放
-  setTimeout(() => {
-    pinNodes.forEach(d => { d.fx = null; d.fy = null; });
-    sim.alphaTarget(0);
-  });
 
   if (selId)      applyHL(selId, 'click');
   else if (hovId) applyHL(hovId, 'hover');
