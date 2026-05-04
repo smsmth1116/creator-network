@@ -11,6 +11,7 @@ const https = require('https');
 
 const PORT           = process.env.PORT || 3000;
 const NOTION_TOKEN   = process.env.NOTION_TOKEN;
+const UNAVATAR_KEY   = process.env.UNAVATAR_KEY;
 const DB_WORKS       = '18860905b37f80358899e51e4e514f92'; // メイン（作品）
 const DB_CREATORS    = '2d260905b37f80fbae0de6cb61a03091'; // クリエイター
 const DB_ARTISTS     = '18860905b37f8093954fdb1bb9602c18'; // アーティスト
@@ -19,6 +20,9 @@ const DB_ARTISTS     = '18860905b37f8093954fdb1bb9602c18'; // アーティスト
 if (!NOTION_TOKEN) {
   console.error('[Error] 環境変数 NOTION_TOKEN が設定されていません。');
   process.exit(1);
+}
+if (!UNAVATAR_KEY) {
+  console.warn('[Warn]  環境変数 UNAVATAR_KEY が未設定です。アバター取得が制限される場合があります。');
 }
 const HTML_FILE      = path.join(__dirname, 'creator-network.html');
 
@@ -52,8 +56,9 @@ function notionRequest(method, apiPath, body) {
 }
 
 // ─── DBを全件取得 → { pageId: titleString } のMapを返す ──────────────────────
-async function fetchDBAsMap(dbId, label) {
-  const map = {};
+async function fetchPersonDB(dbId, label) {
+  const map     = {};
+  const persons = [];
   let cursor  = undefined;
   let hasMore = true;
   let total   = 0;
@@ -66,15 +71,39 @@ async function fetchDBAsMap(dbId, label) {
     if (r.status !== 200) throw new Error(`${label} DB取得失敗: ${r.status}`);
 
     for (const page of r.body.results) {
-      // titleプロパティを探す
-      let title = '';
-      for (const prop of Object.values(page.properties)) {
+      const props = page.properties;
+
+      // Name（titleプロパティを自動検出）
+      let name = '';
+      for (const prop of Object.values(props)) {
         if (prop.type === 'title' && prop.title?.length) {
-          title = prop.title.map(t => t.plain_text).join('');
+          name = prop.title.map(t => t.plain_text).join('');
           break;
         }
       }
-      map[page.id] = title || page.id;
+      if (!name) name = page.id;
+      map[page.id] = name;
+
+      // Role（select / rich_text / multi_select に対応）
+      const roleProp = props['Role'] ?? props['役職'];
+      let role = '';
+      if (roleProp?.type === 'select')           role = roleProp.select?.name ?? '';
+      else if (roleProp?.type === 'rich_text')   role = roleProp.rich_text.map(t => t.plain_text).join('');
+      else if (roleProp?.type === 'multi_select') role = roleProp.multi_select.map(s => s.name).join(', ');
+
+      // SNS（url / rich_text に対応）
+      const snsProp = props['SNS'] ?? props['sns'];
+      let sns = '';
+      if (snsProp?.type === 'url')             sns = snsProp.url ?? '';
+      else if (snsProp?.type === 'rich_text')  sns = snsProp.rich_text.map(t => t.plain_text).join('');
+
+      // Cover画像をアバターとして使用（external / file 両対応）
+      let avatar = '';
+      const cover = page.cover;
+      if (cover?.type === 'external') avatar = cover.external?.url ?? '';
+      else if (cover?.type === 'file') avatar = cover.file?.url ?? '';
+
+      persons.push({ Name: name, Role: role, SNS: sns, Avatar: avatar });
     }
 
     hasMore = r.body.has_more;
@@ -83,7 +112,7 @@ async function fetchDBAsMap(dbId, label) {
   }
 
   console.log(`  [${label}] ${total} 件`);
-  return map;
+  return { map, persons };
 }
 
 // ─── 作品DBを全件取得 ─────────────────────────────────────────────────────────
@@ -144,11 +173,15 @@ function extractValue(prop, creatorMap, artistMap) {
 // ─── メイン処理 ───────────────────────────────────────────────────────────────
 async function buildData() {
   console.log('[Notion] 3つのDBを並列取得中...');
-  const [works, creatorMap, artistMap] = await Promise.all([
+  const [works, creatorResult, artistResult] = await Promise.all([
     fetchWorks(),
-    fetchDBAsMap(DB_CREATORS, 'Creator'),
-    fetchDBAsMap(DB_ARTISTS,  'Artist'),
+    fetchPersonDB(DB_CREATORS, 'Creator'),
+    fetchPersonDB(DB_ARTISTS,  'Artist'),
   ]);
+  const creatorMap = creatorResult.map;
+  const artistMap  = artistResult.map;
+  const creators   = creatorResult.persons;
+  const artists    = artistResult.persons;
 
   // キー一覧（列順保持）
   const keySet = new Set();
@@ -164,8 +197,8 @@ async function buildData() {
     return row;
   });
 
-  console.log(`[Notion] 完了 — 作品 ${rows.length} 件`);
-  return { rows, count: rows.length };
+  console.log(`[Notion] 完了 — 作品 ${rows.length} 件 / Creator ${creators.length} 件 / Artist ${artists.length} 件`);
+  return { rows, creators, artists, count: rows.length };
 }
 
 // ─── HTTPサーバー ─────────────────────────────────────────────────────────────
@@ -176,14 +209,58 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
+  // ─── /avatar : YouTube動画URL → チャンネルアイコンURL を返す ──────────────────
+  if (req.method === 'POST' && req.url === '/avatar') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', async () => {
+      try {
+        const { ytUrl } = JSON.parse(body);
+        if (!ytUrl) throw new Error('ytUrl が指定されていません');
+
+        // 1. oEmbed でチャンネルURLを取得（サーバー側なのでCORS不要）
+        const oembedData = await new Promise((resolve, reject) => {
+          const encoded = encodeURIComponent(ytUrl);
+          https.get(`https://www.youtube.com/oembed?url=${encoded}&format=json`, (res) => {
+            let d = '';
+            res.on('data', c => d += c);
+            res.on('end', () => {
+              try { resolve(JSON.parse(d)); } catch(e) { reject(e); }
+            });
+          }).on('error', reject);
+        });
+
+        const authorUrl = oembedData.author_url || '';
+        const chMatch = authorUrl.match(/youtube\.com\/channel\/([A-Za-z0-9_-]+)/);
+        const hdMatch = authorUrl.match(/youtube\.com\/@([^/?#]+)/);
+        const ytId = chMatch ? chMatch[1] : hdMatch ? hdMatch[1] : null;
+        if (!ytId) throw new Error(`チャンネルID取得失敗: author_url="${authorUrl}"`);
+
+        // 2. unavatar URL を組み立て（APIキーがあればクエリに付与）
+        const avatarUrl = UNAVATAR_KEY
+          ? `https://unavatar.io/youtube/${ytId}?apiKey=${UNAVATAR_KEY}`
+          : `https://unavatar.io/youtube/${ytId}`;
+
+        console.log(`[Avatar] ${oembedData.author_name} (${ytId}) => ${avatarUrl}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ avatarUrl, ytId, authorName: oembedData.author_name }));
+      } catch (e) {
+        console.error('[Avatar Error]', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/notion-data') {
     let body = '';
     req.on('data', c => body += c);
     req.on('end', async () => {
       try {
-        const { rows, count } = await buildData();
+        const { rows, creators, artists, count } = await buildData();
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ results: rows, count }));
+        res.end(JSON.stringify({ results: rows, creators, artists, count }));
       } catch (e) {
         console.error('[Error]', e.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });

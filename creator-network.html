@@ -278,6 +278,35 @@ g.nd { transition: opacity .18s; }
 .pnode-label.dir { color: var(--node-dir); }
 .pnode-label.art { color: var(--node-art); }
 
+/* ── person card nodes (graph上のカード型ノード) ── */
+.pnode-card {
+  display: inline-flex; flex-direction: row; align-items: center; gap: 10px;
+  width: fit-content; height: fit-content;
+  background: var(--card-bg); border: 1.5px solid;
+  border-radius: var(--r); padding: 10px 12px;
+  box-sizing: border-box; pointer-events: none;
+  transition: border-color .15s;
+}
+.pnode-avatar {
+  width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
+  overflow: hidden; display: flex; align-items: center; justify-content: center;
+}
+.pnode-initial {
+  display: flex; width: 100%; height: 100%;
+  align-items: center; justify-content: center;
+  font-size: 14px; font-weight: 700; color: #fff;
+}
+.pnode-text { flex: 1; min-width: 0; overflow: hidden; }
+.pnode-name {
+  font-size: 11px; font-weight: 700; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  line-height: 1.4; margin-bottom: 2px;
+}
+.pnode-role {
+  font-size: 10px; font-weight: 500; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.3;
+}
+
 /* ── context menu ── */
 @keyframes ctxAppear { from { opacity:0; transform:scale(.95); } }
 #ctx-menu {
@@ -491,6 +520,9 @@ g.nd { transition: opacity .18s; }
 ═══════════════════════════════════════════ */
 const CW = 158, CH = 148;
 const DR = 30, AR = 22;
+// person card node サイズ
+const PNW = 200, PNH = 68; // director card width/height
+const ANW = 200, ANH = 56; // artist card width/height
 const HIDDEN_KEY = 'creator_network_hidden_labels';
 
 /* ═══════════════════════════════════════════
@@ -532,18 +564,64 @@ function parseCSV(text) {
 
 function xname(s) { if (!s) return null; const m = s.match(/^(.+?)\s*\(https?:/); return m ? m[1].trim() : s.trim(); }
 function xnames(s) { return s ? s.split(',').map(p => xname(p.trim())).filter(Boolean) : []; }
+
+// SNS URL からサービス名とアイコンを判定
+function snsFromUrl(url) {
+  if (!url || !url.startsWith('http')) return null;
+  const u = url.toLowerCase();
+  if (u.includes('instagram.com'))  return { icon: '📷', label: 'Instagram', url };
+  if (u.includes('x.com') || u.includes('twitter.com')) return { icon: '𝕏', label: 'X', url };
+  if (u.includes('youtube.com') || u.includes('youtu.be')) return { icon: '▶', label: 'YouTube', url };
+  if (u.includes('tiktok.com'))     return { icon: '♪', label: 'TikTok', url };
+  if (u.includes('note.com'))       return { icon: '📝', label: 'note', url };
+  return { icon: '🔗', label: 'Web', url };
+}
 function ytid(url) { if (!url) return null; const m = url.match(/[?&]v=([^&\s]+)/) || url.match(/youtu\.be\/([^?]+)/); return m ? m[1] : null; }
 function thumbUrl(url) { const id = ytid(url); return id ? `https://img.youtube.com/vi/${id}/mqdefault.jpg` : null; }
+
+/* ═══════════════════════════════════════════
+   CREATOR META (Name / Role / SNS テーブル)
+═══════════════════════════════════════════ */
+// name → { role, sns } のキャッシュ（buildGraph より先に呼ぶ）
+const creatorMetaMap = new Map();
+
+function loadCreatorMeta(rows) {
+  // rows は { Name, Role, SNS, Avatar?, 作品 } の配列
+  creatorMetaMap.clear();
+  rows.forEach(row => {
+    const name = (row['Name'] || '').trim(); if (!name) return;
+    const role   = (row['Role']   || '').trim();
+    const snsRaw = (row['SNS']    || '').trim();
+    const avatar = (row['Avatar'] || '').trim();
+    const sns = snsRaw ? [snsFromUrl(snsRaw)].filter(Boolean) : [];
+    creatorMetaMap.set(name, { role, sns, avatar });
+  });
+}
+
+function getCreatorMeta(name) {
+  return creatorMetaMap.get(name) || { role: '', sns: [], avatar: '' };
+}
 
 /* ═══════════════════════════════════════════
    GRAPH BUILD
 ═══════════════════════════════════════════ */
 function buildGraph(rows) {
   const nm = new Map(), links = [];
+
   function ensure(id, type, label, extra = {}) {
-    if (!nm.has(id)) nm.set(id, { id, type, label, ...extra, works: [] });
+    if (!nm.has(id)) {
+      nm.set(id, { id, type, label, ...extra, works: [] });
+    } else {
+      const node = nm.get(id);
+      // avatar / ytWorkUrl は空文字で上書きしない（既存値を保持）
+      const merged = { ...extra };
+      if (!merged.avatar)     delete merged.avatar;
+      if (!merged.ytWorkUrl)  delete merged.ytWorkUrl;
+      Object.assign(node, merged);
+    }
     return nm.get(id);
   }
+
   rows.forEach((row, i) => {
     const title = (row['Title'] || '').trim(); if (!title) return;
     const url = row['URL'] || '';
@@ -552,11 +630,21 @@ function buildGraph(rows) {
     const wid = `w${i}`;
     ensure(wid, 'work', title, { url, th, cats });
     xnames(row['Director / Creator'] || '').forEach(d => {
-      const did = `d_${d}`; ensure(did, 'director', d); nm.get(did).works.push(wid);
+      const did = `d_${d}`;
+      const meta = getCreatorMeta(d);
+      ensure(did, 'director', d, { role: meta.role, sns: meta.sns, avatar: meta.avatar });
+      nm.get(did).works.push(wid);
       links.push({ source: did, target: wid, ltype: 'dir' });
     });
     xnames(row['Artist'] || '').forEach(a => {
-      const aid = `a_${a}`; ensure(aid, 'artist', a); nm.get(aid).works.push(wid);
+      const aid = `a_${a}`;
+      const meta = getCreatorMeta(a);
+      const existingNode = nm.get(aid);
+      // ytWorkUrl: アーティストの参加作品のうち YouTube 動画 URL を持つ最初の1本を保存
+      // （既に確定済みなら上書きしない）
+      const artYtUrl = existingNode?.ytWorkUrl || (ytid(url) ? url : '');
+      ensure(aid, 'artist', a, { role: meta.role, sns: meta.sns, avatar: existingNode?.avatar || '', ytWorkUrl: artYtUrl });
+      nm.get(aid).works.push(wid);
       links.push({ source: aid, target: wid, ltype: 'art' });
     });
   });
@@ -643,7 +731,8 @@ function applyHL(activeId, mode) {
 
   d3.selectAll('g.nd').each(function(d) {
     if (d.type === 'work') return;
-    d3.select(this).style('opacity', !hl || hl.ns.has(d.id) ? 1 : 0.08);
+    const active = !hl || hl.ns.has(d.id);
+    d3.select(this).style('opacity', active ? 1 : 0.08);
   });
 
   d3.selectAll('line.lp').each(function(d) {
@@ -719,24 +808,89 @@ function draw(nodes, links) {
       const tgs = bd.append('xhtml:div').attr('class', 'wc-tags');
       (d.cats || []).slice(0, 3).forEach(c => tgs.append('xhtml:span').attr('class', 'wc-tag').text(c));
     } else {
-      const r = d.type === 'director' ? DR : AR;
-      const col = d.type === 'director' ? 'var(--node-dir)' : 'var(--node-art)';
-      grp.append('circle').attr('r', r-1).attr('fill', 'var(--bg2)');
-      grp.append('circle').attr('class', 'pring').attr('r', r-1).attr('fill', 'none')
-        .attr('stroke', col).attr('stroke-width', d.type === 'director' ? 2 : 1.5)
-        .attr('stroke-opacity', 0.7).datum(d);
-      const fo = grp.append('foreignObject').attr('width', r*2).attr('height', r*2).attr('x', -r).attr('y', -r);
-      fo.append('xhtml:div').attr('class', `pnode-label ${d.type === 'director' ? 'dir' : 'art'}`)
-        .attr('data-id', d.id).text(d.label.length > 13 ? d.label.slice(0,11) + '…' : d.label);
+      const isDir = d.type === 'director';
+      const col   = isDir ? 'var(--node-dir)' : 'var(--node-art)';
+      const cardW = isDir ? PNW : ANW;
+      const cardH = isDir ? PNH : ANH;
+      const initial = [...d.label][0] || '?';
+
+      // 線をカード中心につなぐための不可視サークル（半径1）
+      grp.append('circle').attr('r', 1).attr('fill', 'none').attr('stroke', 'none');
+
+      // 初期サイズは最大値で確保。描画後に実幅を測定して更新する
+      const fo = grp.append('foreignObject')
+        .attr('width', cardW).attr('height', cardH)
+        .attr('x', -cardW / 2).attr('y', -cardH / 2);
+
+      const card = fo.append('xhtml:div')
+        .attr('class', 'pnode-card')
+        .attr('data-id', d.id)
+        .style('border-color', col);
+
+      // アバター円
+      const avatarDiv = card.append('xhtml:div').attr('class', 'pnode-avatar').style('background', col);
+      if (d.avatar) {
+        avatarDiv.append('xhtml:img')
+          .attr('src', d.avatar)
+          .attr('alt', '')
+          .style('width', '100%').style('height', '100%')
+          .style('object-fit', 'cover')
+          .on('error', function() {
+            d3.select(this).remove();
+            avatarDiv.append('xhtml:span').attr('class', 'pnode-initial').text(initial);
+          });
+      } else {
+        avatarDiv.append('xhtml:span').attr('class', 'pnode-initial').text(initial);
+      }
+
+      // テキスト
+      const textDiv = card.append('xhtml:div').attr('class', 'pnode-text');
+      textDiv.append('xhtml:div').attr('class', 'pnode-name').text(d.label);
+      if (isDir) {
+        textDiv.append('xhtml:div').attr('class', 'pnode-role').text(d.role || 'Creator');
+      }
     }
+  });
+
+  // 描画後に各pnode-cardの実幅を測定し foreignObject を中心基準で更新
+  // avatar は fetchArtistAvatars() が非同期で差し込むため、ここでは寸法のみ処理
+  requestAnimationFrame(() => {
+    nSel.each(function(d) {
+      if (d.type === 'work') return;
+      const fo = d3.select(this).select('foreignObject');
+      const cardEl = this.querySelector('.pnode-card');
+      if (!fo.empty() && cardEl) {
+        const rect = cardEl.getBoundingClientRect();
+        if (rect.width > 0) {
+          const w = Math.ceil(rect.width);
+          const h = Math.ceil(rect.height);
+          fo.attr('width', w).attr('height', h)
+            .attr('x', -w / 2).attr('y', -h / 2);
+          d.fw = w; d.fh = h;
+        }
+      }
+      // node.avatar が既にある場合（前回 fetch 済み）は即反映
+      if (d.avatar) {
+        const avatarDiv = this.querySelector('.pnode-avatar');
+        if (avatarDiv && !avatarDiv.querySelector('img')) {
+          avatarDiv.innerHTML = '';
+          const img = document.createElement('img');
+          img.src = d.avatar; img.alt = '';
+          img.style.cssText = 'width:100%;height:100%;object-fit:cover';
+          const initial = [...d.label][0] || '?';
+          img.onerror = () => { avatarDiv.innerHTML = `<span class="pnode-initial">${initial}</span>`; };
+          avatarDiv.appendChild(img);
+        }
+      }
+    });
   });
 
   if (sim) sim.stop();
   sim = d3.forceSimulation(nodes)
-    .force('link',    d3.forceLink(links).id(d => d.id).distance(d => d.ltype === 'dir' ? 220 : 260).strength(.5))
+    .force('link',    d3.forceLink(links).id(d => d.id).distance(d => d.ltype === 'dir' ? 280 : 300).strength(.5))
     .force('charge',  d3.forceManyBody().strength(-2500))
     .force('center',  d3.forceCenter(W/2, H/2))
-    .force('collide', d3.forceCollide(d => d.type === 'work' ? Math.sqrt((CW/2)**2 + (CH/2)**2) + 18 : (d.type === 'director' ? DR : AR) + 14))
+    .force('collide', d3.forceCollide(d => d.type === 'work' ? Math.sqrt((CW/2)**2 + (CH/2)**2) + 18 : Math.sqrt((PNW/2)**2 + (PNH/2)**2) + 12))
     .alphaDecay(.015)
     .on('tick', () => {
       lpSel.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
@@ -798,8 +952,7 @@ function showPanel(d) {
   }
 
   let html = '';
-  if (d.type === 'work') {
-    const vid = ytid(d.url);
+  if (d.type === 'work') {    const vid = ytid(d.url);
     if (vid) {
       html += `<div style="position:relative;width:100%;padding-top:56.25%;border-bottom:1px solid var(--border);background:#000">`;
       html += `<iframe id="yt-iframe" src="https://www.youtube.com/embed/${esc(vid)}?autoplay=0&modestbranding=1&rel=0&iv_load_policy=3" style="position:absolute;inset:0;width:100%;height:100%;border:none" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>`;
@@ -807,12 +960,98 @@ function showPanel(d) {
     } else if (d.th) {
       html += `<img style="width:100%;height:130px;object-fit:cover;border-bottom:1px solid var(--border);display:block" src="${esc(d.th)}" onerror="this.style.display='none'">`;
     }
-    html += `<div style="padding:14px 20px">`;
+    html += `<div style="padding:14px 20px 10px">`;
     html += (d.cats || []).map(c => `<span class="wc-tag" style="margin-right:5px;margin-bottom:5px;display:inline-block;font-size:12px;padding:4px 10px">${esc(c)}</span>`).join('');
     html += `</div>`;
+
+    // --- 参加クリエイター（director のみ）---
+    const workPersons = [];
+    AL.forEach(l => {
+      const s = lid(l.source), t = lid(l.target);
+      if (s === d.id || t === d.id) {
+        const personId = s === d.id ? t : s;
+        const person = AN.find(n => n.id === personId && n.type === 'director');
+        if (person && !workPersons.find(p => p.person.id === person.id))
+          workPersons.push({ person });
+      }
+    });
+    // role あり優先、同じ条件内は名前順
+    workPersons.sort((a, b) => {
+      const ar = a.person.role ? 1 : 0, br = b.person.role ? 1 : 0;
+      if (br !== ar) return br - ar;
+      return a.person.label.localeCompare(b.person.label, 'ja');
+    });
+    if (workPersons.length) {
+      // タイトルと横スクロールカードを同一ブロック（仕切り線なし）に
+      html += `<div style="border-top:1px solid var(--border);padding:10px 14px 14px">`;
+      html += `<div style="font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--text-dim);padding:2px 0 10px">参加クリエイター</div>`;
+      html += `<div style="display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none">`;
+      workPersons.forEach(({ person }) => {
+        const roleText = person.role || 'Creator';
+        const initial  = [...person.label][0] || '?';
+        const avatarUrl = person.avatar || '';
+        const avatarInner = avatarUrl
+          ? `<img src="${esc(avatarUrl)}" alt=""
+               style="width:100%;height:100%;object-fit:cover"
+               onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"
+             ><span style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#fff">${esc(initial)}</span>`
+          : `<span style="display:flex;width:100%;height:100%;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#fff">${esc(initial)}</span>`;
+        html += `<button class="work-person-btn" data-person-id="${esc(person.id)}"
+          style="display:inline-flex;flex-direction:row;align-items:center;gap:10px;
+                 width:fit-content;max-width:200px;flex-shrink:0;
+                 background:var(--card-bg);border:1.5px solid var(--card-border);border-radius:var(--r);
+                 padding:10px 12px;cursor:pointer;text-align:left;transition:all .15s"
+          onmouseover="this.style.borderColor='var(--accent)';this.style.background='var(--bg2)'"
+          onmouseout="this.style.borderColor='var(--card-border)';this.style.background='var(--card-bg)'">
+          <div style="width:36px;height:36px;border-radius:50%;flex-shrink:0;
+                      background:var(--node-art);overflow:hidden;
+                      display:flex;align-items:center;justify-content:center">
+            ${avatarInner}
+          </div>
+          <div style="min-width:0;overflow:hidden">
+            <div style="font-size:11px;font-weight:700;color:var(--text);
+                        overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+                        line-height:1.4;margin-bottom:2px">${esc(person.label)}</div>
+            <div style="font-size:10px;font-weight:500;color:var(--text-2);
+                        overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+                        line-height:1.3">${esc(roleText)}</div>
+          </div>
+        </button>`;
+      });
+      html += `</div></div>`;
+    }
   } else {
     const works = (d.works || []).map(wid => AN.find(n => n.id === wid)).filter(Boolean);
     const sl = d.type === 'director' ? `制作作品 (${works.length})` : `出演作品 (${works.length})`;
+
+    // --- 役職 / SNS リンク ---
+    const hasRole = d.role && d.role.trim();
+    const hasSns  = d.sns && d.sns.length > 0;
+    if (hasRole || hasSns) {
+      html += `<div style="padding:10px 14px 8px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:7px">`;
+      if (hasRole) {
+        html += `<div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-dim)">役職</span>
+          <span style="font-size:12px;font-weight:500;color:var(--text-2);background:var(--bg3);padding:2px 8px;border-radius:100px">${esc(d.role)}</span>
+        </div>`;
+      }
+      if (hasSns) {
+        html += `<div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center">
+          <span style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-dim);margin-right:2px">SNS</span>`;
+        d.sns.forEach(s => {
+          html += `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer"
+            style="display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:500;color:var(--accent);
+                   background:rgba(0,145,255,0.10);border:1px solid rgba(0,145,255,0.25);
+                   padding:3px 9px;border-radius:100px;text-decoration:none;transition:all .15s"
+            onmouseover="this.style.background='var(--accent)';this.style.color='#fff'"
+            onmouseout="this.style.background='rgba(0,145,255,0.10)';this.style.color='var(--accent)'">
+            <span>${s.icon}</span><span>${esc(s.label)}</span>
+          </a>`;
+        });
+        html += `</div>`;
+      }
+      html += `</div>`;
+    }
 
     // --- Top co-workers (非表示ノードを除外) ---
     const counterType = d.type === 'director' ? 'artist' : 'director';
@@ -876,7 +1115,17 @@ function showPanel(d) {
   }
   document.getElementById('pc2').innerHTML = html;
   document.getElementById('info-panel').classList.add('visible');
-  // work のときだけ overlay を暗くする（person パネルは既に上の分岐で overlay を非表示にしている）
+
+  // work パネル内の「参加クリエイター」ボタン → クリエイターパネルへ遷移
+  document.getElementById('pc2').querySelectorAll('.work-person-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const person = AN.find(n => n.id === btn.dataset.personId);
+      if (!person) return;
+      selId = person.id;
+      applyHL(selId, 'click');
+      showPanel(person);
+    });
+  });
 }
 
 /* ═══════════════════════════════════════════
@@ -899,6 +1148,127 @@ function makeFilter() {
 }
 
 /* ═══════════════════════════════════════════
+   ARTIST AVATAR
+   設計:
+   ・キャッシュキー  = YouTube チャンネルID (ytId)
+   ・キャッシュ値    = avatarUrl（必ず apiKey= 付き）
+   ・無効条件        = apiKey= を含まないエントリは破棄
+   フロー:
+     1. buildGraph() で artist.ytWorkUrl（参加作品1本）を確定
+     2. fetchArtistAvatars() 起動
+     3. /avatar へ ytWorkUrl 送信
+        → server が oEmbed でチャンネルID取得 & unavatar URL 組み立て
+        → { avatarUrl, ytId } を返す
+     4. cache[ytId] = avatarUrl で保存
+     5. node.avatar にセット → DOM反映
+═══════════════════════════════════════════ */
+
+// ── キャッシュ構造 ──────────────────────────────────────────────────────────
+// localStorage に保存するオブジェクト:
+//   {
+//     ytIds:  { ytId  → avatarUrl(apiKey付き) },  // チャンネルID → アイコンURL
+//     urlMap: { ytWorkUrl → ytId },               // 動画URL → チャンネルID
+//   }
+// urlMap があることで、2回目以降のロード時に動画URLだけでキャッシュヒットできる
+
+const AVATAR_CACHE_KEY = 'creator_avatar_v3';
+
+function loadAvatarCache() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(AVATAR_CACHE_KEY) || '{}');
+    const ytIds  = raw.ytIds  || {};
+    const urlMap = raw.urlMap || {};
+    // apiKey= を含まない avatarUrl は無効として削除
+    for (const [k, v] of Object.entries(ytIds)) {
+      if (typeof v !== 'string' || !v.includes('apiKey=')) delete ytIds[k];
+    }
+    return { ytIds, urlMap };
+  } catch { return { ytIds: {}, urlMap: {} }; }
+}
+
+function saveAvatarCache(cache) {
+  try { localStorage.setItem(AVATAR_CACHE_KEY, JSON.stringify(cache)); } catch {}
+}
+
+// DOM のアバター欄を画像に差し替える
+function applyAvatarToDOM(node) {
+  const cardEl = document.querySelector(`.pnode-card[data-id="${node.id}"]`);
+  if (!cardEl) return;
+  const avatarDiv = cardEl.querySelector('.pnode-avatar');
+  if (!avatarDiv) return;
+  const initial = [...node.label][0] || '?';
+  avatarDiv.innerHTML = '';
+  const img = document.createElement('img');
+  img.src = node.avatar;
+  img.alt = '';
+  img.style.cssText = 'width:100%;height:100%;object-fit:cover';
+  img.onerror = () => {
+    console.warn(`[Avatar] ${node.label}: 画像ロード失敗`, node.avatar);
+    avatarDiv.innerHTML = `<span class="pnode-initial">${initial}</span>`;
+  };
+  avatarDiv.appendChild(img);
+}
+
+// サーバーの /avatar に ytWorkUrl を送り { avatarUrl, ytId, authorName } を受け取る
+async function fetchAvatarFromServer(ytUrl) {
+  try {
+    const res = await fetch('/avatar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ytUrl }),
+    });
+    if (!res.ok) { console.warn(`[Avatar] HTTP ${res.status}`); return null; }
+    const data = await res.json();
+    if (data.error) { console.warn('[Avatar] サーバーエラー:', data.error); return null; }
+    if (!data.avatarUrl?.includes('apiKey=')) {
+      console.warn('[Avatar] apiKey なし URL を受信 → 破棄', data.avatarUrl);
+      return null;
+    }
+    return data; // { avatarUrl, ytId, authorName }
+  } catch (e) {
+    console.error('[Avatar] fetch 例外:', e);
+    return null;
+  }
+}
+
+async function fetchArtistAvatars() {
+  const cache = loadAvatarCache(); // { ytIds, urlMap }
+
+  // avatar 未設定 かつ ytWorkUrl を持つアーティストが対象
+  const targets = AN.filter(n => n.type === 'artist' && !n.avatar && n.ytWorkUrl);
+  if (!targets.length) { console.log('[Avatar] 取得対象なし'); return; }
+  console.log(`[Avatar] 取得対象: ${targets.length}件`);
+
+  for (const node of targets) {
+    // Step1: ytWorkUrl → ytId → avatarUrl でキャッシュヒット判定
+    const cachedYtId = cache.urlMap[node.ytWorkUrl];
+    if (cachedYtId && cache.ytIds[cachedYtId]) {
+      node.avatar = cache.ytIds[cachedYtId];
+      console.log(`[Avatar] ${node.label}: キャッシュヒット ytId=${cachedYtId}`);
+      applyAvatarToDOM(node);
+      continue;
+    }
+
+    // Step2: サーバーに問い合わせ
+    console.log(`[Avatar] ${node.label}: サーバー取得 →`, node.ytWorkUrl);
+    const data = await fetchAvatarFromServer(node.ytWorkUrl);
+    if (!data) { console.warn(`[Avatar] ${node.label}: 取得失敗 → スキップ`); continue; }
+
+    // Step3: キャッシュに保存（ytId → avatarUrl、ytWorkUrl → ytId の両方）
+    node.avatar = data.avatarUrl;
+    cache.ytIds[data.ytId]        = data.avatarUrl;
+    cache.urlMap[node.ytWorkUrl]  = data.ytId;
+    saveAvatarCache(cache);
+
+    console.log(`[Avatar] ${node.label}: 完了 ytId=${data.ytId}`);
+    applyAvatarToDOM(node);
+
+    // レート制限対策
+    await new Promise(r => setTimeout(r, 350));
+  }
+  console.log('[Avatar] 全処理完了');
+}
+/* ═══════════════════════════════════════════
    REFRESH / INIT
 ═══════════════════════════════════════════ */
 function refresh() {
@@ -911,10 +1281,17 @@ function refresh() {
 function init(rows) {
   const data = buildGraph(rows);
   AN = data.nodes; AL = data.links;
+
+  // キャッシュから ytId が既知のアーティストを事前解決
+  // （ytId は前回の fetch 後に node に保存されていないため、
+  //   キャッシュのキーを全走査してアーティスト名で照合することはせず、
+  //   fetchArtistAvatars() 内で ytId 取得後にキャッシュ保存する設計のまま進む）
+
   loadHiddenState();
   makeFilter();
   refresh();
   updateHiddenUI();
+  fetchArtistAvatars();
 }
 
 /* ═══════════════════════════════════════════
@@ -1136,6 +1513,9 @@ async function fetchFromNotionAPI() {
     const data = await r.json();
     if (data.error) throw new Error(data.error);
     if (!data.results?.length) throw new Error('データが0件です');
+    // creators / artists フィールドがあればメタ情報を先に読み込む
+    const allPersons = [...(data.creators ?? []), ...(data.artists ?? [])];
+    if (allPersons.length) loadCreatorMeta(allPersons);
     init(data.results);
     localStorage.setItem('notion_last_sync', new Date().toLocaleString('ja-JP'));
     showToast(`✓ Notionから ${data.count} 件取得しました`, 'ok');
