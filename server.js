@@ -201,17 +201,44 @@ async function buildData() {
 // ─── Deezer API でアーティスト名からアバター画像URLを取得 ────────────────────
 //
 // フロー:
-//   https://api.deezer.com/search/artist?q=<name>&limit=1 にリクエストを送り、
-//   最初のヒットの picture_medium を imageUrl として返す
+//   1. https://api.deezer.com/search/artist?q=<name>&limit=1 でアーティスト検索
+//   2. 以下のいずれかを満たせば画像を返す:
+//        a. nb_fan > 1000
+//        b. genre_id が K-Pop(129) または J-Pop(52)
+//        c. tracklist の曲タイトルと workTitles のいずれかが部分一致
+//   3. どれも満たさなければ null を返す
+
+// Deezer の genre_id: J-Pop=52, K-Pop=129
+const ALLOWED_GENRE_IDS = new Set([52, 129]);
+
+// tracklist URL から曲タイトル一覧を取得
+function fetchTracklist(tracklistUrl) {
+  return new Promise((resolve) => {
+    https.get(tracklistUrl, { headers: { 'Accept': 'application/json' } }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          const titles = (json.data || []).map(t => (t.title || '').toLowerCase());
+          resolve(titles);
+        } catch {
+          resolve([]);
+        }
+      });
+    }).on('error', () => resolve([]));
+  });
+}
 
 // アーティスト名 → { imageUrl, artistName } を返す
-function searchArtistImage(artistName) {
+// workTitles: アーティストが参加する作品タイトルの配列（tracklist照合用）
+async function searchArtistImage(artistName, workTitles = []) {
   return new Promise((resolve) => {
     const url = `https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}&limit=1`;
     https.get(url, { headers: { 'Accept': 'application/json' } }, (res) => {
       let data = '';
       res.on('data', c => data += c);
-      res.on('end', () => {
+      res.on('end', async () => {
         try {
           const json = JSON.parse(data);
           const artist = json.data?.[0];
@@ -219,13 +246,41 @@ function searchArtistImage(artistName) {
             console.warn(`[Deezer] "${artistName}" が見つかりませんでした`);
             return resolve(null);
           }
-          if ((artist.nb_fan ?? 0) <= 10000) {
-            console.warn(`[Deezer] "${artistName}" nb_fan=${artist.nb_fan} (1万以下) → スキップ`);
-            return resolve(null);
+
+          const nbFan    = artist.nb_fan ?? 0;
+          const genreId  = artist.genre_id ?? -1;
+          console.log(`[Deezer] "${artistName}" nb_fan=${nbFan} genre_id=${genreId}`);
+
+          // 条件a: nb_fan > 1000
+          if (nbFan > 1000) {
+            const imageUrl = artist.picture_medium || artist.picture;
+            console.log(`[Deezer] "${artistName}" nb_fan条件OK → ${imageUrl}`);
+            return resolve({ imageUrl, artistName: artist.name });
           }
-          const imageUrl = artist.picture_medium || artist.picture;
-          console.log(`[Deezer] "${artistName}" nb_fan=${artist.nb_fan} → ${imageUrl}`);
-          resolve({ imageUrl, artistName: artist.name });
+
+          // 条件b: genre_id が K-Pop / J-Pop
+          if (ALLOWED_GENRE_IDS.has(genreId)) {
+            const imageUrl = artist.picture_medium || artist.picture;
+            console.log(`[Deezer] "${artistName}" genre_id=${genreId}(K/J-Pop)条件OK → ${imageUrl}`);
+            return resolve({ imageUrl, artistName: artist.name });
+          }
+
+          // 条件c: tracklist と workTitles の部分一致
+          if (artist.tracklist && workTitles.length > 0) {
+            const trackTitles = await fetchTracklist(artist.tracklist);
+            const normWork = workTitles.map(t => t.toLowerCase());
+            const matched = trackTitles.some(track =>
+              normWork.some(work => track.includes(work) || work.includes(track))
+            );
+            if (matched) {
+              const imageUrl = artist.picture_medium || artist.picture;
+              console.log(`[Deezer] "${artistName}" tracklist一致条件OK → ${imageUrl}`);
+              return resolve({ imageUrl, artistName: artist.name });
+            }
+          }
+
+          console.warn(`[Deezer] "${artistName}" 全条件不一致 → スキップ`);
+          resolve(null);
         } catch (e) {
           console.warn(`[Deezer] "${artistName}" レスポンス解析失敗: ${e.message}`);
           resolve(null);
@@ -274,17 +329,17 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   // ─── /avatar : アーティスト名 → Deezer画像URL を返す ────────────────────────
-  // リクエスト body: { artistName: string }
+  // リクエスト body: { artistName: string, workTitles?: string[] }
   // レスポンス:     { imageUrl, artistName }
   if (req.method === 'POST' && req.url === '/avatar') {
     let body = '';
     req.on('data', c => body += c);
     req.on('end', async () => {
       try {
-        const { artistName } = JSON.parse(body);
+        const { artistName, workTitles = [] } = JSON.parse(body);
         if (!artistName) throw new Error('artistName が指定されていません');
 
-        const result = await searchArtistImage(artistName);
+        const result = await searchArtistImage(artistName, workTitles);
         if (!result || !result.imageUrl) {
           res.writeHead(404, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: `"${artistName}" の画像が見つかりませんでした` }));
@@ -295,6 +350,51 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify(result));
       } catch (e) {
         console.error('[Avatar Error]', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // ─── /avatar-batch : 複数アーティストを並列で一括取得 ────────────────────────
+  // リクエスト body: { artists: [{ artistName: string, workTitles?: string[] }] }
+  // レスポンス:     { results: { [artistName]: { imageUrl, artistName } | null } }
+  if (req.method === 'POST' && req.url === '/avatar-batch') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', async () => {
+      try {
+        const { artists = [] } = JSON.parse(body);
+        if (!artists.length) throw new Error('artists が空です');
+
+        const CONCURRENCY = 5;  // 同時リクエスト数
+        const DELAY_MS    = 100; // 各リクエスト間の待機時間(ms)
+        console.log(`[Batch] ${artists.length}件を並列${CONCURRENCY}で取得開始`);
+
+        const results = {};
+        for (let i = 0; i < artists.length; i += CONCURRENCY) {
+          const chunk = artists.slice(i, i + CONCURRENCY);
+          const settled = await Promise.all(
+            chunk.map(({ artistName, workTitles = [] }) =>
+              searchArtistImage(artistName, workTitles)
+                .then(r => ({ artistName, result: r }))
+                .catch(() => ({ artistName, result: null }))
+            )
+          );
+          settled.forEach(({ artistName, result }) => { results[artistName] = result; });
+          if (i + CONCURRENCY < artists.length) {
+            await new Promise(r => setTimeout(r, DELAY_MS));
+          }
+        }
+
+        const successCount = Object.values(results).filter(Boolean).length;
+        console.log(`[Batch] 完了 — 取得成功: ${successCount}/${artists.length}件`);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results }));
+      } catch (e) {
+        console.error('[Batch Error]', e.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));
       }

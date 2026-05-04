@@ -209,6 +209,7 @@ body {
 #info-panel.mode-side .ph-type { font-size: 10px; margin-bottom: 3px; }
 #info-panel.mode-side .ph-name { font-size: 14px; }
 #info-panel.mode-side .ph-close { width: 22px; height: 22px; font-size: 12px; }
+#info-panel.mode-side #ph-avatar { width: 30px; height: 30px; font-size: 12px; }
 #info-panel.mode-side .ps-title { font-size: 11px; padding: 10px 14px 6px; }
 #info-panel.mode-side .pw-item { gap: 10px; padding: 10px 14px; }
 #info-panel.mode-side .pw-thumb { width: 72px; height: 44px; }
@@ -224,7 +225,7 @@ body {
 #info-panel::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
 .ph {
   padding: 20px 20px 16px; border-bottom: 1px solid var(--border);
-  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
 .ph-type { font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 5px; opacity: .7; }
 .ph-name { font-size: 20px; font-weight: 600; line-height: 1.35; }
@@ -278,6 +279,14 @@ g.nd { transition: opacity .18s; }
 .pnode-label.dir { color: var(--node-dir); }
 .pnode-label.art { color: var(--node-art); }
 
+/* ── avatar fade-in ── */
+.pnode-avatar img.avatar-img {
+  opacity: 0;
+  transition: opacity .45s ease;
+}
+.pnode-avatar img.avatar-img.loaded {
+  opacity: 1;
+}
 /* ── person card nodes (graph上のカード型ノード) ── */
 .pnode-card {
   display: inline-flex; flex-direction: row; align-items: center; gap: 10px;
@@ -409,6 +418,42 @@ g.nd { transition: opacity .18s; }
 #notion-toast.show { display: block; }
 #notion-toast.ok  { border-color: var(--accent);     color: var(--accent); }
 #notion-toast.err { border-color: var(--accent-red); color: var(--accent-red); }
+
+/* ── graph loading overlay ── */
+#graph-loading-overlay {
+  position: fixed;
+  top: var(--topbar-h); left: 0; right: 0; bottom: 0;
+  z-index: 150;
+  background: var(--bg);
+  display: none;
+  opacity: 1;
+  pointer-events: auto;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 14px;
+}
+#graph-loading-overlay.visible {
+  display: flex;
+}
+#graph-loading-overlay.fadeout {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .5s ease;
+}
+#graph-loading-overlay .glo-spinner {
+  width: 28px; height: 28px;
+  border: 2.5px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: gloSpin .7s linear infinite;
+}
+@keyframes gloSpin { to { transform: rotate(360deg); } }
+#graph-loading-overlay .glo-label {
+  font-size: 13px; font-weight: 500;
+  color: var(--text-2);
+  letter-spacing: .02em;
+}
 </style>
 </head>
 <body data-theme="dark">
@@ -476,6 +521,10 @@ g.nd { transition: opacity .18s; }
 </div>
 
 <div id="notion-toast"></div>
+<div id="graph-loading-overlay">
+  <div class="glo-spinner"></div>
+  <div class="glo-label">読み込み中…</div>
+</div>
 <input type="file" id="fi0" accept=".csv" style="display:none">
 <svg id="canvas"></svg>
 
@@ -491,7 +540,8 @@ g.nd { transition: opacity .18s; }
 <div id="info-overlay"></div>
 <div id="info-panel">
   <div class="ph">
-    <div>
+    <div id="ph-avatar" style="display:none;width:40px;height:40px;border-radius:50%;flex-shrink:0;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#fff"></div>
+    <div style="flex:1;min-width:0">
       <div class="ph-type" id="pt"></div>
       <div class="ph-name" id="pn"></div>
     </div>
@@ -754,7 +804,19 @@ function draw(nodes, links) {
   const svg = d3.select('#canvas').attr('width', W).attr('height', H);
   const g = svg.append('g');
 
-  svg.call(d3.zoom().scaleExtent([0.04, 4]).on('zoom', e => g.attr('transform', e.transform)));
+  svg.call(d3.zoom().scaleExtent([0.04, 4]).on('zoom', e => {
+    g.attr('transform', e.transform);
+    // ズーム/パン後に画面内に入った未取得ノードをオブザーバーに再登録
+    if (_avatarObserver) {
+      const uncached = AN.filter(n => n.type === 'artist' && !n.avatar && !_avatarFetching.has(n.id));
+      for (const node of uncached) {
+        const cardEl = document.querySelector(`.pnode-card[data-id="${node.id}"]`);
+        if (cardEl && !_avatarFetchQueue.find(n => n.id === node.id)) {
+          _avatarObserver.observe(cardEl);
+        }
+      }
+    }
+  }));
   svg.on('click', e => {
     if (e.target.tagName === 'svg' || e.target.tagName === 'SVG') {
       selId = null; hovId = null; applyHL(null, null);
@@ -916,6 +978,26 @@ function showPanel(d) {
   document.getElementById('pt').textContent = lbl;
   document.getElementById('pt').style.color = col;
   document.getElementById('pn').textContent = d.label;
+
+  // ph アバター更新
+  const phAvatar = document.getElementById('ph-avatar');
+  if (d.type === 'work') {
+    phAvatar.style.display = 'none';
+  } else {
+    phAvatar.style.display = 'flex';
+    phAvatar.style.background = col;
+    phAvatar.innerHTML = '';
+    const initial = [...d.label][0] || '?';
+    if (d.avatar) {
+      const img = document.createElement('img');
+      img.src = d.avatar; img.alt = '';
+      img.style.cssText = 'width:100%;height:100%;object-fit:cover';
+      img.onerror = () => { phAvatar.innerHTML = initial; };
+      phAvatar.appendChild(img);
+    } else {
+      phAvatar.textContent = initial;
+    }
+  }
 
   const panel = document.getElementById('info-panel');
   const overlay = document.getElementById('info-overlay');
@@ -1174,80 +1256,216 @@ function saveAvatarCache(cache) {
   try { localStorage.setItem(AVATAR_CACHE_KEY, JSON.stringify(cache)); } catch {}
 }
 
-// DOM のアバター欄を画像に差し替える
+// DOM のアバター欄を画像にフェードインで差し替える
 function applyAvatarToDOM(node) {
   const cardEl = document.querySelector(`.pnode-card[data-id="${node.id}"]`);
   if (!cardEl) return;
   const avatarDiv = cardEl.querySelector('.pnode-avatar');
   if (!avatarDiv) return;
   const initial = [...node.label][0] || '?';
-  avatarDiv.innerHTML = '';
+  const isDir = node.type === 'director';
+  const nodeBg = isDir ? 'var(--node-dir)' : 'var(--node-art)';
+
   const img = document.createElement('img');
+  img.className = 'avatar-img';  // opacity:0 からスタート
   img.src = node.avatar;
   img.alt = '';
   img.style.cssText = 'width:100%;height:100%;object-fit:cover';
-  img.onerror = () => {
-    console.warn(`[Avatar] ${node.label}: 画像ロード失敗`, node.avatar);
-    avatarDiv.innerHTML = `<span class="pnode-initial">${initial}</span>`;
-  };
-  avatarDiv.appendChild(img);
-}
 
-// サーバーの /avatar にアーティスト名を送り { spotifyId, imageUrl, artistName } を受け取る
-async function fetchAvatarFromServer(artistName) {
-  try {
-    const res = await fetch('/avatar', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ artistName }),
-    });
-    if (!res.ok) { console.warn(`[Avatar] HTTP ${res.status}`); return null; }
-    const data = await res.json();
-    if (data.error) { console.warn('[Avatar] サーバーエラー:', data.error); return null; }
-    if (!data.imageUrl) { console.warn('[Avatar] imageUrl が空'); return null; }
-    return data; // { spotifyId, imageUrl, artistName }
-  } catch (e) {
-    console.error('[Avatar] fetch 例外:', e);
-    return null;
+  img.onload = () => {
+    // イニシャル span を除去してから画像をフェードイン
+    avatarDiv.querySelectorAll('.pnode-initial').forEach(el => el.remove());
+    avatarDiv.appendChild(img);
+    requestAnimationFrame(() => img.classList.add('loaded'));
+  };
+  img.onerror = () => {
+    // 失敗時: 青背景＋イニシャルをそのまま維持
+    console.warn(`[Avatar] ${node.label}: 画像ロード失敗`, node.avatar);
+    avatarDiv.style.background = nodeBg;
+    if (!avatarDiv.querySelector('.pnode-initial')) {
+      const span = document.createElement('span');
+      span.className = 'pnode-initial';
+      span.textContent = initial;
+      avatarDiv.appendChild(span);
+    }
+  };
+  // DOM に入れずに先読みスタート（onload/onerror が発火したら上記で処理）
+  img.src = node.avatar;
+
+  // パネルが同じノードを表示中なら ph-avatar も更新
+  if (selId === node.id) {
+    const phAvatar = document.getElementById('ph-avatar');
+    if (phAvatar && phAvatar.style.display !== 'none') {
+      phAvatar.innerHTML = '';
+      const pImg = document.createElement('img');
+      pImg.src = node.avatar; pImg.alt = '';
+      pImg.style.cssText = 'width:100%;height:100%;object-fit:cover';
+      pImg.onerror = () => {
+        phAvatar.style.background = nodeBg;
+        phAvatar.innerHTML = `<span class="pnode-initial">${initial}</span>`;
+      };
+      phAvatar.appendChild(pImg);
+    }
   }
 }
 
-async function fetchArtistAvatars() {
-  const cache = loadAvatarCache(); // { artistName → proxyUrl }
 
-  // avatar 未設定のアーティストが対象（ytWorkUrl 不要）
-  const targets = AN.filter(n => n.type === 'artist' && !n.avatar);
-  if (!targets.length) { console.log('[Avatar] 取得対象なし'); return; }
-  console.log(`[Avatar] 取得対象: ${targets.length}件`);
+// ── Intersection Observer ベースの遅延アバター取得 ─────────────────────────
+// 画面内に入ったノードカードを検出し、未取得のアーティストのみ順次フェッチする
 
-  for (const node of targets) {
-    // キャッシュヒット判定（アーティスト名ベース）
+let _avatarObserver = null;          // 現在の IntersectionObserver
+const _avatarFetching = new Set();   // 処理中のノードID（重複防止）
+const _avatarFetchQueue = [];        // 可視になった順の待機キュー
+let _avatarQueueTimer = null;        // キュー処理タイマー
+
+// アバター取得前: 特に何もしない（青背景＋イニシャルがそのまま表示される）
+function applyAvatarLoading(node) {
+  // no-op: 青背景はノード生成時に設定済み
+}
+
+// キューに溜まったノードを一定間隔でバッチ処理
+async function _processAvatarQueue() {
+  _avatarQueueTimer = null;
+  if (!_avatarFetchQueue.length) return;
+
+  const cache = loadAvatarCache();
+
+  // キューを取り出す（最大20件ずつ）
+  const batch = _avatarFetchQueue.splice(0, 20);
+  const toFetch = [];
+
+  for (const node of batch) {
+    if (_avatarFetching.has(node.id)) continue;
+    if (node.avatar) continue;  // 既に取得済み
+
+    // キャッシュヒット → 即反映
     if (cache[node.label]) {
       node.avatar = cache[node.label];
       console.log(`[Avatar] ${node.label}: キャッシュヒット`);
       applyAvatarToDOM(node);
+    } else {
+      toFetch.push(node);
+      _avatarFetching.add(node.id);
+    }
+  }
+
+  if (!toFetch.length) {
+    // まだキューが残っている場合は次を処理
+    if (_avatarFetchQueue.length) _scheduleAvatarQueue();
+    return;
+  }
+
+  console.log(`[Avatar] ${toFetch.length}件を取得中...`, toFetch.map(n => n.label));
+
+  const artists = toFetch.map(node => ({
+    artistName: node.label,
+    workTitles: (node.works || []).map(wid => AN.find(n => n.id === wid)?.label).filter(Boolean),
+  }));
+
+  let results = {};
+  try {
+    const res = await fetch('/avatar-batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ artists }),
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    results = data.results || {};
+  } catch (e) {
+    console.error('[Avatar] バッチ取得失敗:', e);
+    toFetch.forEach(n => _avatarFetching.delete(n.id));
+    if (_avatarFetchQueue.length) _scheduleAvatarQueue();
+    return;
+  }
+
+  for (const node of toFetch) {
+    _avatarFetching.delete(node.id);
+    const result = results[node.label];
+    if (!result || !result.imageUrl) {
+      console.warn(`[Avatar] ${node.label}: 取得失敗 → スキップ`);
+      // 失敗時: 青背景＋イニシャルをそのまま維持（特に操作不要）
+      console.warn(`[Avatar] ${node.label}: 取得失敗 → 青背景のまま`);
       continue;
     }
-
-    // サーバーに問い合わせ
-    console.log(`[Avatar] ${node.label}: Deezer 検索中...`);
-    const data = await fetchAvatarFromServer(node.label);
-    if (!data) { console.warn(`[Avatar] ${node.label}: 取得失敗 → スキップ`); continue; }
-
-    // /avatar-img/<base64(imageUrl)> 経由でプロキシ
-    const encoded = btoa(data.imageUrl);
-    const proxyUrl = `/avatar-img/${encoded}`;
+    const proxyUrl = `/avatar-img/${btoa(result.imageUrl)}`;
     node.avatar = proxyUrl;
     cache[node.label] = proxyUrl;
-    saveAvatarCache(cache);
-
     console.log(`[Avatar] ${node.label}: 完了`);
     applyAvatarToDOM(node);
-
-    // レート制限対策（Spotify APIは無料でも十分余裕あり）
-    await new Promise(r => setTimeout(r, 200));
   }
-  console.log('[Avatar] 全処理完了');
+  saveAvatarCache(cache);
+
+  // キューに残りがあれば続きを処理
+  if (_avatarFetchQueue.length) _scheduleAvatarQueue();
+}
+
+function _scheduleAvatarQueue() {
+  if (_avatarQueueTimer) return;
+  _avatarQueueTimer = setTimeout(_processAvatarQueue, 80);
+}
+
+// SVG の foreignObject は画面スクロールでも位置が変わるため
+// canvas の transform 変化後に再チェックする仕組みも持つ
+function setupAvatarObserver() {
+  // 既存のオブザーバーを破棄
+  if (_avatarObserver) { _avatarObserver.disconnect(); _avatarObserver = null; }
+  _avatarFetchQueue.length = 0;
+
+  const cache = loadAvatarCache();
+
+  // artist ノードのカード要素を全取得して監視開始
+  const targets = AN.filter(n => n.type === 'artist' && !n.avatar);
+  if (!targets.length) { console.log('[Avatar] 取得対象なし'); return; }
+  console.log(`[Avatar] ${targets.length}件を監視開始`);
+
+  // パルスを即時適用（ロード待ち状態を視覚化）
+  for (const node of targets) {
+    if (cache[node.label]) {
+      // キャッシュあり → パルス不要、即反映
+      node.avatar = cache[node.label];
+      applyAvatarToDOM(node);
+    } else {
+      applyAvatarLoading(node);
+    }
+  }
+
+  const uncached = targets.filter(n => !n.avatar);
+  if (!uncached.length) { console.log('[Avatar] 全キャッシュヒット'); return; }
+
+  _avatarObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const id = entry.target.dataset.id;
+      const node = AN.find(n => n.id === id);
+      if (!node || node.avatar || _avatarFetching.has(id)) continue;
+      // 既にキューに入っていなければ追加
+      if (!_avatarFetchQueue.find(n => n.id === id)) {
+        _avatarFetchQueue.push(node);
+        _scheduleAvatarQueue();
+      }
+      // 監視解除（一度キューに入れたら不要）
+      _avatarObserver.unobserve(entry.target);
+    }
+  }, {
+    root: null,           // ビューポート基準
+    rootMargin: '60px',   // 60px 手前から先読み
+    threshold: 0,
+  });
+
+  // 現在 DOM にあるカードを監視登録
+  for (const node of uncached) {
+    const cardEl = document.querySelector(`.pnode-card[data-id="${node.id}"]`);
+    if (cardEl) _avatarObserver.observe(cardEl);
+  }
+}
+
+// draw() が呼ばれるたびに新しい DOM を再監視するためのエントリポイント
+function fetchArtistAvatars() {
+  // rAF 後に DOM が確定してから監視を開始
+  requestAnimationFrame(() => setupAvatarObserver());
 }
 /* ═══════════════════════════════════════════
    REFRESH / INIT
@@ -1259,6 +1477,22 @@ function refresh() {
   draw(nodes, links);
 }
 
+function showGraphOverlay() {
+  const el = document.getElementById('graph-loading-overlay');
+  el.classList.remove('fadeout');
+  el.classList.add('visible');
+}
+
+function hideGraphOverlay(delayMs = 500) {
+  const el = document.getElementById('graph-loading-overlay');
+  setTimeout(() => {
+    el.classList.add('fadeout');
+    el.addEventListener('transitionend', () => {
+      el.classList.remove('visible', 'fadeout');
+    }, { once: true });
+  }, delayMs);
+}
+
 function init(rows) {
   const data = buildGraph(rows);
   AN = data.nodes; AL = data.links;
@@ -1268,6 +1502,7 @@ function init(rows) {
   //   キャッシュのキーを全走査してアーティスト名で照合することはせず、
   //   fetchArtistAvatars() 内で ytId 取得後にキャッシュ保存する設計のまま進む）
 
+  hideGraphOverlay(2000);
   loadHiddenState();
   makeFilter();
   refresh();
@@ -1482,6 +1717,7 @@ function showToast(msg, type = 'ok', duration = 3200) {
 }
 
 async function fetchFromNotionAPI() {
+  showGraphOverlay();
   const btn = document.getElementById('notion-sync-btn');
   const label = btn.querySelector('span:last-child');
   btn.classList.add('loading'); label.textContent = '取得中…';
@@ -1499,12 +1735,12 @@ async function fetchFromNotionAPI() {
     if (allPersons.length) loadCreatorMeta(allPersons);
     init(data.results);
     localStorage.setItem('notion_last_sync', new Date().toLocaleString('ja-JP'));
-    showToast(`✓ Notionから ${data.count} 件取得しました`, 'ok');
   } catch (e) {
     console.error('[Notion]', e);
     const msg = (e.message.includes('Failed to fetch') || e.message.includes('NetworkError'))
       ? 'CORSエラー: server.js をご利用ください' : `✗ ${e.message}`;
     showToast(msg, 'err', 6000);
+    hideGraphOverlay(0);
   } finally {
     btn.classList.remove('loading'); label.textContent = '更新';
   }
