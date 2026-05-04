@@ -1180,7 +1180,7 @@ function showPanel(d) {
                    padding:3px 9px;border-radius:100px;text-decoration:none;transition:all .15s"
             onmouseover="this.style.background='var(--accent)';this.style.color='#fff'"
             onmouseout="this.style.background='rgba(0,145,255,0.10)';this.style.color='var(--accent)'">
-            <span>${s.icon}</span><span>${esc(s.label)}</span>
+            <span>${esc(s.label)}</span>
           </a>`;
         });
         html += `</div>`;
@@ -1242,14 +1242,25 @@ function showPanel(d) {
     // --- Works list ---
     html += `<div class="ps-title">${esc(sl)}</div>`;
     works.forEach(w => {
-      html += `<a class="pw-item" ${w.url ? `href="${esc(w.url)}" target="_blank"` : ''}>`;
+      html += `<button class="pw-item" data-work-id="${esc(w.id)}" style="width:100%;text-align:left;background:none;border:none;cursor:pointer;font-family:var(--sans)">`;
       if (w.th) html += `<img class="pw-thumb" src="${esc(w.th)}" onerror="this.style.display='none'">`;
       html += `<div class="pw-ph" style="${w.th ? 'display:none' : ''}">🎬</div>`;
-      html += `<div><div class="pw-title">${esc(w.label)}</div><div class="pw-cat">${(w.cats||[]).join(', ')}</div></div></a>`;
+      html += `<div><div class="pw-title">${esc(w.label)}</div><div class="pw-cat">${(w.cats||[]).join(', ')}</div></div></button>`;
     });
   }
   document.getElementById('pc2').innerHTML = html;
   document.getElementById('info-panel').classList.add('visible');
+
+  // 出演・制作作品 → 作品パネルへ遷移
+  document.getElementById('pc2').querySelectorAll('.pw-item[data-work-id]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const work = AN.find(n => n.id === btn.dataset.workId);
+      if (!work) return;
+      selId = work.id;
+      applyHL(selId, 'click');
+      showPanel(work);
+    });
+  });
 
   // work パネル内の「参加クリエイター」ボタン → クリエイターパネルへ遷移
   document.getElementById('pc2').querySelectorAll('.work-person-btn').forEach(btn => {
