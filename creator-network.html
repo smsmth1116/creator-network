@@ -98,17 +98,63 @@ body {
 #search-box:focus { border-color: var(--accent); background-color: var(--bg2); }
 #search-box::placeholder { color: var(--text-dim); }
 
-.filter-scroller { display: flex; gap: 5px; flex: 1; overflow-x: auto; min-width: 0; }
-.filter-scroller::-webkit-scrollbar { display: none; }
+/* ── tag filter button & dropdown ── */
+#tag-filter-wrap { position: relative; flex-shrink: 0; }
 
-.fbtn {
-  background: var(--bg3); border: none; color: var(--text-2); padding: 5px 12px;
-  font-family: var(--sans); font-size: 12px; font-weight: 500;
-  border-radius: 100px; cursor: pointer; white-space: nowrap;
-  transition: all .18s; letter-spacing: -.1px;
+#tag-filter-btn {
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg3); border: 1.5px solid transparent; color: var(--text-2);
+  border-radius: var(--r-sm); cursor: pointer;
+  transition: all .18s; padding: 0; flex-shrink: 0;
 }
-.fbtn:hover { background: var(--border-hi); color: var(--text); }
-.fbtn.active { background: var(--accent); color: rgb(28,28,30); font-weight: 600; }
+#tag-filter-btn:hover { background: var(--border-hi); color: var(--text); }
+#tag-filter-btn.active {
+  background: var(--accent); color: rgb(28,28,30);
+  border-color: transparent;
+}
+#tag-filter-btn.active svg { stroke: rgb(28,28,30); }
+
+#tag-filter-dropdown {
+  display: none; position: fixed;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 6px;
+  min-width: 180px; max-height: 320px; overflow-y: auto;
+  z-index: 400;
+  box-shadow: 0 8px 32px rgba(0,0,0,.28);
+  animation: ctxAppear .15s cubic-bezier(.4,0,.2,1);
+}
+#tag-filter-dropdown.open { display: block; }
+#tag-filter-dropdown::-webkit-scrollbar { width: 4px; }
+#tag-filter-dropdown::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
+
+.tfd-item {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 10px; border-radius: var(--r-sm);
+  cursor: pointer; font-size: 12px; font-weight: 500;
+  color: var(--text-2); transition: background .12s;
+  user-select: none;
+}
+.tfd-item:hover { background: var(--bg3); color: var(--text); }
+.tfd-item.checked { color: var(--text); }
+.tfd-check {
+  width: 15px; height: 15px; border-radius: 4px; flex-shrink: 0;
+  border: 1.5px solid var(--border-hi); background: transparent;
+  display: flex; align-items: center; justify-content: center;
+  transition: all .15s;
+}
+.tfd-item.checked .tfd-check {
+  background: var(--accent); border-color: var(--accent);
+}
+.tfd-check::after {
+  content: ''; display: none;
+  width: 4px; height: 7px;
+  border: 1.5px solid rgb(28,28,30);
+  border-top: none; border-left: none;
+  transform: rotate(45deg) translateY(-1px);
+}
+.tfd-item.checked .tfd-check::after { display: block; }
+.tfd-sep { height: 1px; background: var(--border); margin: 4px 0; }
 
 .topbar-right { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
 
@@ -464,7 +510,14 @@ g.nd { transition: opacity .18s; }
   <div class="logo">Creator<span class="logo-dot">·</span>Net</div>
   <div class="sep"></div>
   <input type="text" id="search-box" placeholder="検索...">
-  <div class="filter-scroller" id="filter-row"></div>
+  <div id="tag-filter-wrap">
+    <button id="tag-filter-btn" title="タグで絞り込み">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+      </svg>
+    </button>
+    <div id="tag-filter-dropdown"></div>
+  </div>
   <div class="topbar-right">
     <div class="sep"></div>
     <label class="tog-wrap" id="depth-tog" title="関連人物の別作品も展開">
@@ -579,7 +632,7 @@ const HIDDEN_KEY = 'creator_network_hidden_labels';
    STATE
 ═══════════════════════════════════════════ */
 let AN = [], AL = [];
-let aFilter = 'ALL', sq = '', depth2 = false;
+let aFilters = new Set(), sq = '', depth2 = false;  // aFilters: 空=全表示
 let showDir = true, showArt = true;
 let hiddenIds = new Set();
 let selId = null, hovId = null;
@@ -718,8 +771,8 @@ function filteredData() {
   let nodes = AN.filter(n => vids.has(n.id));
   let links = AL.filter(l => vids.has(lid(l.source)) && vids.has(lid(l.target)));
 
-  if (aFilter !== 'ALL') {
-    const wids = new Set(nodes.filter(n => n.type === 'work' && n.cats.includes(aFilter)).map(n => n.id));
+  if (aFilters.size > 0) {
+    const wids = new Set(nodes.filter(n => n.type === 'work' && (n.cats || []).some(c => aFilters.has(c))).map(n => n.id));
     const keep = new Set();
     links.forEach(l => { const s = lid(l.source), t = lid(l.target); if (wids.has(s) || wids.has(t)) { keep.add(s); keep.add(t); } });
     nodes = nodes.filter(n => keep.has(n.id));
@@ -1211,23 +1264,86 @@ function showPanel(d) {
 }
 
 /* ═══════════════════════════════════════════
-   FILTER BUTTONS
+   TAG FILTER DROPDOWN
 ═══════════════════════════════════════════ */
-function makeFilter() {
+function updateTagFilterBtn() {
+  const btn = document.getElementById('tag-filter-btn');
+  btn.classList.toggle('active', aFilters.size > 0);
+  // title でフィルター数をツールチップに表示
+  btn.title = aFilters.size > 0 ? `タグで絞り込み中 (${aFilters.size}件)` : 'タグで絞り込み';
+}
+
+function renderTagDropdown() {
+  const dd = document.getElementById('tag-filter-dropdown');
   const cats = new Set();
   AN.filter(n => n.type === 'work').forEach(n => (n.cats || []).forEach(c => cats.add(c)));
-  const fr = document.getElementById('filter-row');
-  fr.innerHTML = '';
-  const mkBtn = (label, active = false) => {
-    const b = document.createElement('button');
-    b.className = 'fbtn' + (active ? ' active' : '');
-    b.textContent = label;
-    b.onclick = () => { document.querySelectorAll('.fbtn').forEach(x => x.classList.remove('active')); b.classList.add('active'); aFilter = label; refresh(); };
-    return b;
-  };
-  fr.appendChild(mkBtn('ALL', true));
-  [...cats].sort().forEach(c => fr.appendChild(mkBtn(c)));
+  const sorted = [...cats].sort();
+  dd.innerHTML = '';
+
+  // 「すべてクリア」行
+  if (aFilters.size > 0) {
+    const clear = document.createElement('div');
+    clear.className = 'tfd-item';
+    clear.style.cssText = 'color:var(--accent);font-weight:600';
+    clear.textContent = '✕  絞り込みをクリア';
+    clear.addEventListener('click', e => {
+      e.stopPropagation();
+      aFilters.clear();
+      updateTagFilterBtn();
+      renderTagDropdown();
+      refresh();
+    });
+    dd.appendChild(clear);
+    const sep = document.createElement('div');
+    sep.className = 'tfd-sep';
+    dd.appendChild(sep);
+  }
+
+  sorted.forEach(cat => {
+    const item = document.createElement('div');
+    item.className = 'tfd-item' + (aFilters.has(cat) ? ' checked' : '');
+    item.innerHTML = `<div class="tfd-check"></div><span>${esc(cat)}</span>`;
+    item.addEventListener('click', e => {
+      e.stopPropagation();
+      if (aFilters.has(cat)) aFilters.delete(cat); else aFilters.add(cat);
+      updateTagFilterBtn();
+      renderTagDropdown();
+      refresh();
+    });
+    dd.appendChild(item);
+  });
 }
+
+function makeFilter() {
+  renderTagDropdown();
+  updateTagFilterBtn();
+}
+
+// ドロップダウン開閉
+const _tfBtn = document.getElementById('tag-filter-btn');
+const _tfDd  = document.getElementById('tag-filter-dropdown');
+
+function openTagDropdown() {
+  renderTagDropdown();
+  // ボタンの位置に合わせて dropdown を配置
+  const rect = _tfBtn.getBoundingClientRect();
+  _tfDd.style.top  = (rect.bottom + 6) + 'px';
+  _tfDd.style.left = rect.left + 'px';
+  _tfBtn.classList.add('open');
+  _tfDd.classList.add('open');
+}
+function closeTagDropdown() {
+  _tfBtn.classList.remove('open');
+  _tfDd.classList.remove('open');
+}
+
+_tfBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  _tfDd.classList.contains('open') ? closeTagDropdown() : openTagDropdown();
+});
+document.addEventListener('click', e => {
+  if (!_tfDd.contains(e.target) && e.target !== _tfBtn) closeTagDropdown();
+});
 
 /* ═══════════════════════════════════════════
    ARTIST AVATAR (Deezer)
@@ -1483,7 +1599,7 @@ function showGraphOverlay() {
   el.classList.add('visible');
 }
 
-function hideGraphOverlay(delayMs = 500) {
+function hideGraphOverlay(delayMs = 2000) {
   const el = document.getElementById('graph-loading-overlay');
   setTimeout(() => {
     el.classList.add('fadeout');
