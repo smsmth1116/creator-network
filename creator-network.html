@@ -925,10 +925,10 @@ const HIDDEN_KEY = 'creator_network_hidden_labels';
 let AN = [], AL = [];
 let ALL_CREATORS = [];
 let aFilters = new Set(), sq = '', depth2 = false;  // aFilters: 空=全表示
-let showDir = true, showArt = true;
+let showDir = true, showArt = true, simTimer = null, baseLinkStrength = 0.5;
 let hiddenIds = new Set();
 let selId = null, hovId = null;
-let sim = null, gDimRect = null;
+let sim = null, gDimRect = null, draggedNode = null, connectedToDragged = new Set();
 
 /* ═══════════════════════════════════════════
    UTILS
@@ -1187,9 +1187,87 @@ function draw(nodes, links) {
 
   const nSel = gN.selectAll('g.nd').data(nodes, d => d.id).join('g').attr('class', 'nd')
     .call(d3.drag()
-      .on('start', (e, d) => { if (!e.active) sim.alphaTarget(.3).restart(); d.fx = d.x; d.fy = d.y; })
-      .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; })
-      .on('end',   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; })
+      .on('start', (e, d) => {
+        if (!e.active) sim.alphaTarget(.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+        draggedNode = d;
+        connectedToDragged.clear();
+
+        if (e.sourceEvent.shiftKey) {
+          d._isClusterDrag = true;
+          d._clusterNodes = new Set([d]);
+          // 直接つながっているノードを収集
+          AL.forEach(l => {
+            if (lid(l.source) === d.id) {
+              d._clusterNodes.add(l.target);
+            } else if (lid(l.target) === d.id) {
+              d._clusterNodes.add(l.source);
+            }
+          });
+
+          // クラスター内の各ノードの初期固定位置と、ドラッグ対象ノードからの相対オフセットを保存
+          d._clusterNodes.forEach(node => {
+            node.fx = node.x;
+            node.fy = node.y;
+            node._dragRelX = node.x - d.x;
+            node._dragRelY = node.y - d.y;
+          });
+        }
+
+        const dragSourceIds = d._isClusterDrag ? new Set([...d._clusterNodes].map(n => n.id)) : new Set([d.id]);
+        AL.forEach(l => {
+          const s = lid(l.source), t = lid(l.target);
+          const isS = dragSourceIds.has(s), isT = dragSourceIds.has(t);
+          // 片方がドラッグ群で、もう片方が外側のノードの場合のみ距離を固定する
+          if (isS && !isT) {
+            connectedToDragged.add(t);
+            l._initialDistance = Math.sqrt((l.source.x - l.target.x)**2 + (l.source.y - l.target.y)**2);
+          }
+          if (isT && !isS) {
+            connectedToDragged.add(s);
+            l._initialDistance = Math.sqrt((l.source.x - l.target.x)**2 + (l.source.y - l.target.y)**2);
+          }
+        });
+
+        // D3のforceLinkにアクセサの再評価を強制する（これをしないと初期距離が反映されない）
+        sim.force('link')
+           .distance(sim.force('link').distance())
+           .strength(sim.force('link').strength());
+      })
+      .on('drag',  (e, d) => {
+        d.fx = e.x;
+        d.fy = e.y;
+        if (d._isClusterDrag) {
+          d._clusterNodes.forEach(node => { if (node.id !== d.id) { node.fx = d.fx + node._dragRelX; node.fy = d.fy + node._dragRelY; } });
+        }
+      })
+      .on('end',   (e, d) => {
+        if (!e.active) sim.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+        draggedNode = null;
+        // ドラッグ終了時にリンクの初期距離設定をクリア
+        AL.forEach(l => {
+          delete l._initialDistance;
+        });
+        // ドラッグ終了時にデフォルト値（280/300）へ戻すために再トリガー
+        sim.force('link')
+           .distance(sim.force('link').distance())
+           .strength(sim.force('link').strength());
+        connectedToDragged.clear();
+
+        if (d._isClusterDrag) {
+          d._clusterNodes.forEach(node => {
+            node.fx = null;
+            node.fy = null;
+            delete node._dragRelX;
+            delete node._dragRelY;
+          });
+          delete d._isClusterDrag;
+          delete d._clusterNodes;
+        }
+      })
     )
     .on('mouseenter', (e, d) => { if (selId) return; hovId = d.id; applyHL(hovId, 'hover'); })
     .on('mouseleave', (e, d) => { if (selId) return; hovId = null; applyHL(null, null); })
@@ -1295,16 +1373,65 @@ function draw(nodes, links) {
 
   if (sim) sim.stop();
   sim = d3.forceSimulation(nodes)
-    .force('link',    d3.forceLink(links).id(d => d.id).distance(d => d.ltype === 'dir' ? 280 : 300).strength(.5))
+    .force('link',    d3.forceLink(links).id(d => d.id)
+      .distance(l => {
+        if (draggedNode && l._initialDistance != null) {
+          return l._initialDistance;
+        }
+        return l.ltype === 'dir' ? 280 : 300;
+      })
+      .strength(l => {
+      if (draggedNode) {
+        const s = lid(l.source), t = lid(l.target);
+        const isCluster = draggedNode._isClusterDrag;
+        // 強度を少し抑える(0.2)ことで、他のノードとの衝突を避けつつスムーズに追従させる
+        if (isCluster ? (draggedNode._clusterNodes.has(l.source) || draggedNode._clusterNodes.has(l.target)) : (s === draggedNode.id || t === draggedNode.id)) return 0.2;
+        const isConnectedToDragged = isCluster ? (draggedNode._clusterNodes.has(l.source) || draggedNode._clusterNodes.has(l.target)) : (s === draggedNode.id || t === draggedNode.id);
+
+        if (isConnectedToDragged && l._initialDistance != null) {
+          const dx = l.source.x - l.target.x;
+          const dy = l.source.y - l.target.y;
+          const currentDistance = Math.sqrt(dx * dx + dy * dy);
+
+          // 現在の距離が初期距離以下の場合、リンクの力を0にして押し戻さない
+          if (currentDistance <= l._initialDistance) {
+            return 0;
+          }
+          // 現在の距離が初期距離より大きい場合、適度な力で引き寄せる
+          return 0.8; // 紐で引かれるように追従するため、強度を上げる
+        }
+      }
+      return baseLinkStrength;
+    }))
     .force('charge',  d3.forceManyBody().strength(-2500))
     .force('center',  d3.forceCenter(W/2, H/2))
     .force('collide', d3.forceCollide(d => d.type === 'work' ? Math.sqrt((CW/2)**2 + (CH/2)**2) + 18 : Math.sqrt((PNW/2)**2 + (PNH/2)**2) + 12))
     .alphaDecay(.015)
     .on('tick', () => {
+      if (draggedNode) {
+        nodes.forEach(n => {
+          // ドラッグに直接関係ない（つながっていない）ノードは動かさないようにして、操作感を安定させる
+          if (n.fx === null && !connectedToDragged.has(n.id)) {
+            n.vx = 0; n.vy = 0;
+          }
+        });
+      }
       lpSel.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
            .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
       nSel.attr('transform', d => `translate(${d.x},${d.y})`);
     });
+
+  if (simTimer) clearTimeout(simTimer);
+  simTimer = setTimeout(() => {
+    if (sim) {
+      sim.force('charge').strength(-400).distanceMax(150); // 反発は近距離でしっかり効かせつつ、範囲を150pxに限定
+      baseLinkStrength = 0.01; // リンクの力を弱める
+      sim.force('link').strength(sim.force('link').strength());
+      sim.velocityDecay(0.7);            // 摩擦を強くして、動きがネットワーク全体に伝搬しないようにする
+      sim.force('center', null); // 中心力を無効化
+      sim.alpha(0.05).restart();
+    }
+  }, 3000);
 
   if (selId)      applyHL(selId, 'click');
   else if (hovId) applyHL(hovId, 'hover');
